@@ -7,6 +7,11 @@ into your Flask server. This plugin allows the server to accept JWE requests and
 JWE responses. This module depends on the [pyjwkest](https://github.com/rohe/pyjwkest), so the algorithms and encoding methods 
 supported by this module are those that are supported by **pyjwkest**.
 
+## Dependecies
+
+1. [pyJwkest](https://github.com/rohe/pyjwkest)
+2. [PyRedis](http://pyredis.readthedocs.org/en/latest/)
+
 ## How to Use
 
 In order to allow your Flask server to accept or respond to JWE messages, simply instantiate the plugin on the Flask app:
