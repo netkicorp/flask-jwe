@@ -1,19 +1,34 @@
 import json
-import time
 import traceback
 
-from jwkest import jwe
+from jwkest import jwe, base64_to_long
 from jwkest.ecc import NISTEllipticCurve
 from jwkest.jwe import JWE
 from jwkest.jwk import ECKey
 from flask import Response, request
+from functools import wraps
+from urlparse import urlparse
 
 try:
     from flask import _app_ctx_stack as stack
 except ImportError:
     from flask import _request_ctx_stack as stack
 
+try:
+    from redis import StrictRedis, ConnectionError
+    from redis.sentinel import Sentinel
+except ImportError:
+    pass
+
 JOSE_CONTENT_TYPE = 'application/jose'
+
+def jwe_request_required(f):
+    @wraps(f)
+    def wrapped(*args, **kwargs):
+        if not request.__dict__.get('is_jwe', False):
+            return Response('JWE Request Required', status=400, mimetype='text/plain')
+        return f(*args, **kwargs)
+    return wrapped
 
 class FlaskJWE(object):
     def __init__(self, app=None):
@@ -34,6 +49,9 @@ class FlaskJWE(object):
         app.config.setdefault('JWE_ECDH_ES_KEY_EXPIRES', -1) # Expiration Time in Seconds
         app.config.setdefault('JWE_SERVER_RSA_KEY', None)
         app.config.setdefault('JWE_SERVER_SYM_KEY', None)
+        app.config.setdefault('JWE_ECDH_ES_KEY_PER_IP', True)
+        app.config.setdefault('JWE_ECDH_ES_KEY_XOR', None)
+        app.config.setdefault('JWE_SET_REQUEST_DATA', True)
 
         # Set Redis Defaults
         app.config.setdefault('JWE_REDIS_URI', 'redis://localhost:6379/1')
@@ -120,6 +138,9 @@ class FlaskJWE(object):
 
             request.is_jwe = True
             request.get_jwe_data = get_jwe_data
+            if self.app.config['JWE_SET_REQUEST_DATA']:
+                request.data = msg
+                request._cached_data = msg
         except Exception as e:
             self.app.logger.error("Unable to decrypt JWE: %s" % str(e))
             self.app.logger.error(traceback.format_exc())
@@ -143,47 +164,116 @@ class FlaskJWE(object):
     # Server Ephemeral Static Key Operations
     #########################################
     def get_server_key(self, app):
+
+        key = None
+        curve = NISTEllipticCurve.by_name(app.config['ECDH_CURVE'])
+
         try:
-            from redis import Redis
-            import redis_lock
-        except ImportError:
-            app.logger.error("Unable to import redis-py")
-            return None
+            client = self.get_redis_client(connection_uri=app.config['JWE_REDIS_URI'])
+            if not client:
+                app.logger.fatal('Unable to connect to Redis')
+                return None
 
-        client = Redis.from_url(app.config['JWE_REDIS_URI'])
+            key_name = 'flask-jwe-ecdh-es-key'
+            if app.config['JWE_ECDH_ES_KEY_PER_IP']:
+                key_name += '-%s' % self.get_remote_ip()
 
-        new_key_required = False
-        last_updated = client.hget('ecdh-es-key', 'last_updated')
-        if not last_updated or (app.config['JWE_ECDH_ES_KEY_EXPIRES'] > 0 and int(last_updated) < int(time.time()) - app.config['JWE_ECDH_ES_KEY_EXPIRES']):
-            new_key_required = True
+            ec_jwk = client.get(key_name)
+            if not ec_jwk:
 
-        if new_key_required:
-            lock = redis_lock.Lock(client, "ECDH-ES-Lock")
-            try:
-                priv, pub = NISTEllipticCurve.by_name(app.config['ECDH_CURVE']).key_pair()
+                app.logger.debug('Creating New ECDH-ES KeyPair')
+
+                # Generate New EC Keypair
+                priv, pub = curve.key_pair()
                 ec_jwk = ECKey(use='enc', x=pub[0], y=pub[1], d=priv, crv=app.config['ECDH_CURVE'])
 
-                if lock.acquire(blocking=False):
-                    vals = {
-                        'jwk': json.dumps(ec_jwk.serialize(True)),
-                        'last_updated': int(time.time())
-                    }
-                    client.hmset('ecdh-es-key', vals)
+                # Set JWK Value if it doesn't already exist
+                client.setnx(key_name, json.dumps(ec_jwk.serialize(True)))
 
-                    return ec_jwk
-                else:
-                    app.logger.error("Unable to Aquire ECDH-ES-Lock to Reset KeyPair")
-            except Exception as e:
-                app.logger.error("Exception Occurred Generating New ECDH-ES KeyPair: %s" % str(e))
-                return None
-            finally:
-                lock.release()
+                # Set expiration if there is no expiration on the key
+                if app.config['JWE_ECDH_ES_KEY_EXPIRES'] > 0 and not client.ttl(key_name):
+                    client.expire(key_name, app.config['JWE_ECDH_ES_KEY_EXPIRES'])
 
-        jwk_dict = json.loads(client.hget('ecdh-es-key', 'jwk'))
-        key = ECKey(use='enc', x=jwk_dict['x'], y=jwk_dict['y'], d=jwk_dict['d'], crv=jwk_dict['crv'])
+                # Retrieve the key again in case the key was created elsewhere in a race condition
+                ec_jwk = client.get(key_name)
+
+            # Reconstitute the ECKey from the ec_jwk data
+            jwk_dict = json.loads(ec_jwk)
+
+            # XOR Privkey If Configured to do so
+            if app.config['JWE_ECDH_ES_KEY_XOR']:
+                base_d = base64_to_long(jwk_dict['d'].encode('utf-8'))
+                xor_value = app.config['JWE_ECDH_ES_KEY_XOR'] & int('FF' * curve.bytes, 16)
+                calc_priv = base_d ^ xor_value
+                calc_pub = curve.public_key_for(calc_priv)
+                key = ECKey(use='enc', x=calc_pub[0], y=calc_pub[1], d=calc_priv, crv=jwk_dict['crv'])
+            else:
+                key = ECKey(use='enc', x=jwk_dict['x'], y=jwk_dict['y'], d=jwk_dict['d'], crv=jwk_dict['crv'])
+        except Exception as e:
+            app.logger.error('Exception Occurred Generating Retrieving / Setting ECDH-ES KeyPair: %s' % str(e))
+
         return key
 
+    @jwe_request_required
     def reverse_echo(self):
-        if request.is_jwe:
+        if self.app.config['JWE_SET_REQUEST_DATA']:
+            ret_str = request.get_data()[::-1]
+        else:
             ret_str = request.get_jwe_data()[::-1]
-            return Response(ret_str)
+        return Response(ret_str)
+
+    #########################################
+    # Utility Functionality
+    #########################################
+    def get_remote_ip(self):
+        if request.access_route:
+            return request.access_route[0]
+        else:
+            return request.remote_addr or '127.0.0.1'
+
+    def get_redis_client(self, connection_uri=None, read_only=False):
+
+        if not connection_uri:
+            self.app.logger.fatal('Redis Connection URI Required')
+            return None
+
+        redis_client = None
+        redis_uri = urlparse(connection_uri)
+
+        if not StrictRedis or not Sentinel:
+            self.app.logger.fatal('Unable to Import Redis')
+
+        if redis_uri.scheme == 'redis':
+
+            redis_args = {
+                'host': redis_uri.hostname,
+                'port': redis_uri.port
+            }
+            if redis_uri.path.lstrip('/'):
+                redis_args['db'] = redis_uri.path.lstrip('/')
+
+            redis_client = StrictRedis(**redis_args)
+
+        elif redis_uri.scheme == 'redis+sentinel':
+
+            sentinel_endpoints = [(y[0], y[1]) for y in [x.strip().split(':') for x in redis_uri.netloc.split(',')]]
+            service_name = redis_uri.path.lstrip('/')
+            sentinel = Sentinel(sentinel_endpoints, socket_timeout=2, retry_on_timeout=True)
+
+            for _ in range(5):
+                if read_only:
+                    redis_client = sentinel.slave_for(service_name)
+                else:
+                    redis_client = sentinel.master_for(service_name)
+
+                try:
+                    redis_client.info()
+                    break
+                except ConnectionError as e:
+                    self.app.logger.warn('Redis %s Sentinel Connection Error: %s' % ('Slave' if read_only else 'Master', str(e)))
+                    redis_client = None
+
+        else:
+            self.app.logger.fatal('Unsupported REDIS URI Scheme. Unable to get Redis client [SCHEME: %s]' % redis_uri.scheme)
+
+        return redis_client

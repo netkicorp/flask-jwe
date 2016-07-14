@@ -1,6 +1,5 @@
 Flask==0.10.1
--e git+https://github.com/eleweek/flask-testing@82d7b832c28d6f752453acf661e02899db9c5897#egg=Flask_Testing
+Flask-Testing==0.5.0
 mock==1.3.0
-pyjwkest==1.1.5
-python-redis-lock==3.0.0
+pyjwkest==1.1.7
 redis==2.10.5

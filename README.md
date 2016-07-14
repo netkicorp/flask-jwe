@@ -33,11 +33,14 @@ from flask.ext.jwe import FlaskJWE
 app = Flask('MyTestApp')
 encrypted_content = FlaskJWE(app)
 
-app.config['JWE_REDIS_URI'] = 'redis://localhost:6379/1'    # Default
-app.config['SERVER_PUB_JWK_ENDPOINT'] = '/serverpubkey'     # Default
-app.config['JWE_ECDH_ES'] = True                            # Default
-app.config['ECDH_CURVE'] = 'P-256'                          # Default, other options: 'P-256', 'P-384' or 'P-512'
-app.config['JWE_ECDH_ES_KEY_EXPIRES'] = 600                 # Not Default
+app.config['JWE_REDIS_URI'] = 'redis://localhost:6379/1'                    # Default
+app.config['SERVER_PUB_JWK_ENDPOINT'] = '/serverpubkey'                     # Default
+app.config['JWE_ECDH_ES'] = True                                            # Default
+app.config['ECDH_CURVE'] = 'P-256'                                          # Default, other options: 'P-256', 'P-384' or 'P-512'
+app.config['JWE_ECDH_ES_KEY_EXPIRES'] = 600                                 # Not Default
+app.config['JWE_ECDH_ES_KEY_PER_IP'] = True                                 # Default
+app.config['JWE_ECDH_ES_KEY_XOR'] = int(os.urandom(32).encode('hex'), 16)   # Not Default
+app.config['JWE_SET_REQUEST_DATA'] = True                                   # Default
 
 symkey = SYMKey(key='supersecretsymmetrickey')
 app.config['JWE_SERVER_SYM_KEY'] = symkey                   # Specific Server-wide Symmetry Encryption Key
@@ -56,8 +59,10 @@ The plugin is configured via Flask configuration options. The following table de
 | JWE_ECDH_ES_KEY_EXPIRES | ECDH-ES Public Key Expiration Time in Seconds.<br><br>For no expiration, set to -1 | -1 |
 | JWE_SERVER_RSA_KEY | Shared RSA Key Used for Encryption (Must be of type jwkest.jwk.RSAKey) | None |
 | JWE_SERVER_SYM_KEY | Shared Symmetric Key Used for Encryption (Must be of type jwkest.jwk.SYMKey) | None |
-| JWE_REDIS_URI | Redis URI String Used for Storing ECDH-ES Key (required for multiple, shared servers | 'redis://localhost:6379/1' |
-
+| JWE_REDIS_URI | Redis (or Redis Sentinel) URI String Used for Storing ECDH-ES Key (required for multiple, shared servers | 'redis://localhost:6379/1' |
+| JWE_ECDH_ES_KEY_PER_IP | Create ECDH-ES Key per IP | True |
+| JWE_ECDH_ES_KEY_XOR | XOR Value for ECDH-ES Private Key to use such that Redis-stored ECDH-ES Key is Not the Actual Key Used for JWE | None |
+| JWE_SET_REQUEST_DATA | Replace request.data with decrypted request data | True
 
 ## Supported Algorithms and Encoding Methods
 
@@ -97,7 +102,12 @@ As of the time of this writing (module version 1.1.5), the supported encryption 
 | is_jwe      | Boolean field set to True if the request is a JWE request |
 | jwe         | JWE Token Object | 
 
+### Decorators
+| Function             | Description |
+| -------------------- | ----------- |
+| jwe_request_required | Decorator to require a JWE request. Returns 400 error in case of non-JWE request | 
+
 ## Test Mode
 
-When Flask's app.config['TESTING'] config value is set to True, FlaskJWE adds a POST test endpont, '/flaskjwe-reverse-echo', 
-which will accept a JWE request and respond with a JWE containing the reversed content.
+When Flask's **app.config['TESTING']** config value is set to True, FlaskJWE adds a **POST** test endpoint. The hardcoded endpoint is currently '/flaskjwe-reverse-echo'. 
+The endpoint will accept a JWE request and respond with a JWE response containing the reversed content.

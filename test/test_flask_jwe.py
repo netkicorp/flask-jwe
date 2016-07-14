@@ -6,7 +6,7 @@ import unittest
 
 from mock import patch, Mock, MagicMock
 from mock.mock import _patch
-from flask_jwe import FlaskJWE
+from flask_jwe import FlaskJWE, urlparse, base64_to_long, jwe_request_required, Response
 from flask.config import Config
 
 
@@ -21,6 +21,31 @@ class AutoPatchTestCase(unittest.TestCase):
                         raise
                     print "TEST ERROR: Patcher Not Started [%s - %s]" % (self.__class__.__name__, self._testMethodName)
                     raise
+
+class TestJweRequestRequiredDecorator(AutoPatchTestCase):
+
+    def setUp(self):
+
+        self.patcher1 = patch('flask_jwe.request')
+        self.mockRequest = self.patcher1.start()
+
+        # Mock the decorator function -> We run self.decorated
+        self.mock_func = MagicMock(return_value='fake_response')
+        self.mock_func.__name__ = 'mock_func'
+        self.decorated = jwe_request_required(self.mock_func)
+
+    def test_is_jwe_request(self):
+        self.mockRequest.is_jwe = True
+        ret = self.decorated()
+        self.assertEqual('fake_response', ret)
+
+    def test_not_jwe_request(self):
+        self.mockRequest.is_jwe = False
+        ret = self.decorated()
+        self.assertIsInstance(ret, Response)
+        self.assertEqual('JWE Request Required', ret.data)
+        self.assertEqual(400, ret.status_code)
+        self.assertEqual('text/plain', ret.mimetype)
 
 
 class TestContructor(AutoPatchTestCase):
@@ -72,6 +97,9 @@ class TestInitApp(AutoPatchTestCase):
         self.assertEqual(-1, self.app.config['JWE_ECDH_ES_KEY_EXPIRES'])
         self.assertIsNone(self.app.config['JWE_SERVER_RSA_KEY'])
         self.assertIsNone(self.app.config['JWE_SERVER_SYM_KEY'])
+        self.assertTrue(self.app.config['JWE_ECDH_ES_KEY_PER_IP'])
+        self.assertIsNone(self.app.config['JWE_ECDH_ES_KEY_XOR'])
+        self.assertTrue(self.app.config['JWE_SET_REQUEST_DATA'])
 
         self.assertEqual(1, self.mockRouteInUse.call_count)
         self.assertEqual(self.app, self.mockRouteInUse.call_args[0][0])
@@ -346,6 +374,15 @@ class TestJweDecrypt(AutoPatchTestCase):
         self.assertFalse(self.app.logger.error.called)
         self.assertFalse(self.mockResponse.called)
         self.assertEqual('retval', self.mockRequest.get_jwe_data())
+        self.assertEqual('retval', self.mockRequest.data)
+
+    def test_do_not_reset_data(self):
+
+        self.ext.app.config = {'JWE_SET_REQUEST_DATA': False}
+
+        self.ext.jwe_decrypt(self.jwe)
+
+        self.assertNotEqual('retval', self.mockRequest.data)
 
     def test_decrypt_exception(self):
 
@@ -430,251 +467,163 @@ class TestGetServerKey(AutoPatchTestCase):
 
     def setUp(self):
 
-        self.patcher1 = patch('redis.Redis.from_url')
-        self.patcher2 = patch('redis_lock.Lock')
-        self.patcher3 = patch('flask_jwe.NISTEllipticCurve')
-        self.patcher4 = patch('flask_jwe.ECKey')
-        self.patcher5 = patch('flask_jwe.time')
+        self.patcher1 = patch('flask_jwe.FlaskJWE.get_redis_client')
+        self.patcher2 = patch('flask_jwe.NISTEllipticCurve')
+        self.patcher3 = patch('flask_jwe.ECKey')
+        self.patcher4 = patch('flask_jwe.FlaskJWE.get_remote_ip')
 
-        self.mockRedis = self.patcher1.start()
-        self.mockLock = self.patcher2.start()
-        self.mockCurve = self.patcher3.start()
-        self.mockECKey = self.patcher4.start()
-        self.mockTime = self.patcher5.start()
+        self.mockGetRedisClient = self.patcher1.start()
+        self.mockNISTEllipticCurve = self.patcher2.start()
+        self.mockECKey = self.patcher3.start()
+        self.mockGetRemoteIp = self.patcher4.start()
+
+        self.mockGetRemoteIp.return_value = '127.0.0.1'
 
         self.app = MagicMock()
         self.app.config = Config(None)
-        self.app.config['JWE_ECDH_ES_KEY_EXPIRES'] = 0
+        self.app.config['JWE_ECDH_ES_KEY_EXPIRES'] = 60
         self.app.config['ECDH_CURVE'] = 'P-256'
         self.app.config['JWE_REDIS_URI'] = 'redis://localhost/1'
+        self.app.config['JWE_ECDH_ES_KEY_PER_IP'] = True
+        self.app.config['JWE_ECDH_ES_KEY_XOR'] = int('f20ebf86ffb87412c64448deb6d33b9936eb717129395ce1d80e6c0ea443e5de4880e4f7e7f82e11deb81ac9a5f0277da3635e830d997cada6db2809cc1b5f4e', 16)
 
         self.ext = FlaskJWE()
         self.ext.app = self.app
 
-        self.mockRedis.return_value.hget.side_effect = [
-            '1000',
-            json.dumps({
-                'x': 0,
-                'y': 1,
-                'd': 2,
-                'crv': 'P-256'
-            })
-        ]
-        self.mockCurve.by_name.return_value.key_pair.return_value = (0, (1,2))
+        self.ec_jwk = {
+            "use": "enc",
+            "crv": "P-256",
+            "kty": "EC",
+            "y": "eyMJKfYgZb3tmvVtkVgeboH_QvXWClpwlkQXKtVrsUM",
+            "x": "xVxq0YuyfkmiiLVE5bLZj1wLzEO5EPdBjIvwSy75GZk",
+            "d": "07Jj5Xr938BRrtKuXngxHfrE4JVgUS2Nkr6N0RtOoyA"
+        }
+
+        self.mockRedis = MagicMock()
+        self.mockRedis.get.side_effect = [None, json.dumps(self.ec_jwk)]
+        self.mockRedis.ttl.return_value = None
+        self.mockGetRedisClient.return_value = self.mockRedis
+
+        self.mockCurve = MagicMock()
+        self.mockCurve.bytes = 32
+        self.mockCurve.key_pair.return_value = 'priv', ('x', 'y')
+        self.mockCurve.public_key_for.return_value = ('new_x', 'new_y')
+        self.mockNISTEllipticCurve.by_name.return_value = self.mockCurve
+
+        # self.mockGetRedisClient.return_value.get.side_effect = json.dumps({'x': 0, 'y': 1, 'd': 2, 'crv': 'P-256'})
+        # self.mockCurve.by_name.return_value.key_pair.return_value = (0, (1,2))
         self.mockECKey.return_value.serialize.return_value = {}
 
-    def test_new_key_not_required_never_expires(self):
+    def test_non_existant_key_with_xor(self):
 
         ret = self.ext.get_server_key(self.app)
 
-        self.assertEqual(1, self.mockRedis.call_count)
-        self.assertEqual(2, self.mockRedis.return_value.hget.call_count)
-
-        self.assertEqual('ecdh-es-key', self.mockRedis.return_value.hget.call_args_list[0][0][0])
-        self.assertEqual('last_updated', self.mockRedis.return_value.hget.call_args_list[0][0][1])
-        self.assertEqual('ecdh-es-key', self.mockRedis.return_value.hget.call_args_list[1][0][0])
-        self.assertEqual('jwk', self.mockRedis.return_value.hget.call_args_list[1][0][1])
-
-        self.assertEqual(0, self.mockLock.call_count)
-        self.assertEqual(0, self.mockCurve.by_name.call_count)
-        self.assertEqual(0, self.mockRedis.return_value.hmset.call_count)
-
-        self.assertEqual(1, self.mockECKey.call_count)
-        self.assertEqual(0, self.mockECKey.call_args[1]['x'])
-        self.assertEqual(1, self.mockECKey.call_args[1]['y'])
-        self.assertEqual(2, self.mockECKey.call_args[1]['d'])
-        self.assertEqual('P-256', self.mockECKey.call_args[1]['crv'])
         self.assertEqual(self.mockECKey.return_value, ret)
 
-    def test_new_key_not_required_not_yet_expired(self):
+        self.assertEqual(1, self.mockNISTEllipticCurve.by_name.call_count)
+        self.assertEqual(self.app.config['ECDH_CURVE'], self.mockNISTEllipticCurve.by_name.call_args[0][0])
 
-        self.app.config['JWE_ECDH_ES_KEY_EXPIRES'] = 5
-        self.mockTime.time.return_value = 6
-        self.mockRedis.return_value.hget.side_effect = [
-            '1',
-            json.dumps({
-                'x': 0,
-                'y': 1,
-                'd': 2,
-                'crv': 'P-256'
-            })
-        ]
+        self.assertEqual(1, self.mockGetRedisClient.call_count)
+        self.assertEqual(self.app.config['JWE_REDIS_URI'], self.mockGetRedisClient.call_args[1]['connection_uri'])
 
-        ret = self.ext.get_server_key(self.app)
+        self.assertEqual(1, self.mockGetRemoteIp.call_count)
 
-        self.assertEqual(1, self.mockRedis.call_count)
-        self.assertEqual(2, self.mockRedis.return_value.hget.call_count)
+        self.assertEqual(2, self.mockRedis.get.call_count)
+        self.assertEqual('flask-jwe-ecdh-es-key-127.0.0.1', self.mockRedis.get.call_args_list[0][0][0])
+        self.assertEqual('flask-jwe-ecdh-es-key-127.0.0.1', self.mockRedis.get.call_args_list[1][0][0])
 
-        self.assertEqual('ecdh-es-key', self.mockRedis.return_value.hget.call_args_list[0][0][0])
-        self.assertEqual('last_updated', self.mockRedis.return_value.hget.call_args_list[0][0][1])
-        self.assertEqual('ecdh-es-key', self.mockRedis.return_value.hget.call_args_list[1][0][0])
-        self.assertEqual('jwk', self.mockRedis.return_value.hget.call_args_list[1][0][1])
+        self.assertEqual(1, self.mockCurve.key_pair.call_count)
+        self.assertEqual(1, self.mockECKey.return_value.serialize.call_count)
 
-        self.assertEqual(0, self.mockLock.call_count)
-        self.assertEqual(0, self.mockCurve.by_name.call_count)
-        self.assertEqual(0, self.mockRedis.return_value.hmset.call_count)
+        self.assertEqual(1, self.mockRedis.setnx.call_count)
+        self.assertEqual('flask-jwe-ecdh-es-key-127.0.0.1', self.mockRedis.setnx.call_args[0][0])
+        self.assertEqual('{}', self.mockRedis.setnx.call_args[0][1])
 
-        self.assertEqual(1, self.mockECKey.call_count)
-        self.assertEqual(0, self.mockECKey.call_args[1]['x'])
-        self.assertEqual(1, self.mockECKey.call_args[1]['y'])
-        self.assertEqual(2, self.mockECKey.call_args[1]['d'])
-        self.assertEqual('P-256', self.mockECKey.call_args[1]['crv'])
-        self.assertEqual(self.mockECKey.return_value, ret)
+        self.assertEqual(1, self.mockRedis.ttl.call_count)
+        self.assertEqual('flask-jwe-ecdh-es-key-127.0.0.1', self.mockRedis.ttl.call_args[0][0])
+        self.assertEqual(1, self.mockRedis.expire.call_count)
+        self.assertEqual('flask-jwe-ecdh-es-key-127.0.0.1', self.mockRedis.expire.call_args[0][0])
+        self.assertEqual(self.app.config['JWE_ECDH_ES_KEY_EXPIRES'], self.mockRedis.expire.call_args[0][1])
 
-    def test_new_key_required_old_expired(self):
+        # Check ECKey() calls
+        self.assertEqual(2, self.mockECKey.call_count)
 
-        self.app.config['JWE_ECDH_ES_KEY_EXPIRES'] = 5
-        self.mockTime.time.return_value = 10
-        self.mockRedis.return_value.hget.side_effect = [
-            '1',
-            json.dumps({
-                'x': 0,
-                'y': 1,
-                'd': 2,
-                'crv': 'P-256'
-            })
-        ]
+        self.assertEqual('enc', self.mockECKey.call_args_list[0][1]['use'])
+        self.assertEqual('x', self.mockECKey.call_args_list[0][1]['x'])
+        self.assertEqual('y', self.mockECKey.call_args_list[0][1]['y'])
+        self.assertEqual('priv', self.mockECKey.call_args_list[0][1]['d'])
+        self.assertEqual(self.app.config['ECDH_CURVE'], self.mockECKey.call_args_list[0][1]['crv'])
 
-        ret = self.ext.get_server_key(self.app)
+        new_priv = base64_to_long(self.ec_jwk['d'])
+        calc_d = new_priv ^ (self.app.config['JWE_ECDH_ES_KEY_XOR'] & int('FF'*32,16))
 
-        self.assertEqual(1, self.mockRedis.call_count)
-        self.assertEqual(1, self.mockRedis.return_value.hget.call_count)
+        self.assertEqual('enc', self.mockECKey.call_args_list[1][1]['use'])
+        self.assertEqual('new_x', self.mockECKey.call_args_list[1][1]['x'])
+        self.assertEqual('new_y', self.mockECKey.call_args_list[1][1]['y'])
+        self.assertEqual(calc_d, self.mockECKey.call_args_list[1][1]['d'])
+        self.assertEqual(self.app.config['ECDH_CURVE'], self.mockECKey.call_args_list[1][1]['crv'])
 
-        self.assertEqual('ecdh-es-key', self.mockRedis.return_value.hget.call_args[0][0])
-        self.assertEqual('last_updated', self.mockRedis.return_value.hget.call_args[0][1])
+    def test_no_redis_client(self):
 
-        self.assertEqual(1, self.mockLock.call_count)
-        self.assertEqual(self.mockRedis.return_value, self.mockLock.call_args[0][0])
-        self.assertEqual('ECDH-ES-Lock', self.mockLock.call_args[0][1])
-        self.assertEqual(1, self.mockLock.return_value.acquire.call_count)
-        self.assertEqual(1, self.mockLock.return_value.release.call_count)
-
-        self.assertEqual(1, self.mockCurve.by_name.call_count)
-        self.assertEqual(1, self.mockRedis.return_value.hmset.call_count)
-        self.assertEqual('{}', self.mockRedis.return_value.hmset.call_args[0][1]['jwk'])
-        self.assertEqual(10, self.mockRedis.return_value.hmset.call_args[0][1]['last_updated'])
-
-        self.assertEqual(1, self.mockECKey.call_count)
-        self.assertEqual(1, self.mockECKey.call_args[1]['x'])
-        self.assertEqual(2, self.mockECKey.call_args[1]['y'])
-        self.assertEqual(0, self.mockECKey.call_args[1]['d'])
-        self.assertEqual('P-256', self.mockECKey.call_args[1]['crv'])
-        self.assertEqual(self.mockECKey.return_value, ret)
-
-        self.assertFalse(self.app.logger.error.called)
-
-    def test_new_key_required_no_previous(self):
-
-        self.mockRedis.return_value.hget.side_effect = [
-            None,
-            json.dumps({
-                'x': 0,
-                'y': 1,
-                'd': 2,
-                'crv': 'P-256'
-            })
-        ]
-
-        ret = self.ext.get_server_key(self.app)
-
-        self.assertEqual(1, self.mockRedis.call_count)
-        self.assertEqual(1, self.mockRedis.return_value.hget.call_count)
-
-        self.assertEqual('ecdh-es-key', self.mockRedis.return_value.hget.call_args[0][0])
-        self.assertEqual('last_updated', self.mockRedis.return_value.hget.call_args[0][1])
-
-        self.assertEqual(1, self.mockLock.call_count)
-        self.assertEqual(self.mockRedis.return_value, self.mockLock.call_args[0][0])
-        self.assertEqual('ECDH-ES-Lock', self.mockLock.call_args[0][1])
-        self.assertEqual(1, self.mockLock.return_value.acquire.call_count)
-        self.assertEqual(1, self.mockLock.return_value.release.call_count)
-
-        self.assertEqual(1, self.mockCurve.by_name.call_count)
-        self.assertEqual(1, self.mockRedis.return_value.hmset.call_count)
-        self.assertEqual('{}', self.mockRedis.return_value.hmset.call_args[0][1]['jwk'])
-        self.assertEqual(1, self.mockRedis.return_value.hmset.call_args[0][1]['last_updated'])
-
-        self.assertEqual(1, self.mockECKey.call_count)
-        self.assertEqual(1, self.mockECKey.call_args[1]['x'])
-        self.assertEqual(2, self.mockECKey.call_args[1]['y'])
-        self.assertEqual(0, self.mockECKey.call_args[1]['d'])
-        self.assertEqual('P-256', self.mockECKey.call_args[1]['crv'])
-        self.assertEqual(self.mockECKey.return_value, ret)
-
-        self.assertFalse(self.app.logger.error.called)
-
-    def test_new_key_required_curve_exception(self):
-
-        self.mockCurve.by_name.side_effect = Exception()
-        self.mockRedis.return_value.hget.side_effect = [
-            None,
-            json.dumps({
-                'x': 0,
-                'y': 1,
-                'd': 2,
-                'crv': 'P-256'
-            })
-        ]
+        self.mockGetRedisClient.return_value = None
 
         ret = self.ext.get_server_key(self.app)
 
         self.assertIsNone(ret)
-        self.assertEqual(1, self.mockRedis.call_count)
-        self.assertEqual(1, self.mockRedis.return_value.hget.call_count)
+        self.assertFalse(self.mockGetRemoteIp.called)
 
-        self.assertEqual('ecdh-es-key', self.mockRedis.return_value.hget.call_args[0][0])
-        self.assertEqual('last_updated', self.mockRedis.return_value.hget.call_args[0][1])
+    def test_no_key_per_ip(self):
 
-        self.assertEqual(1, self.mockLock.call_count)
-        self.assertEqual(self.mockRedis.return_value, self.mockLock.call_args[0][0])
-        self.assertEqual('ECDH-ES-Lock', self.mockLock.call_args[0][1])
-        self.assertEqual(0, self.mockLock.return_value.acquire.call_count)
-        self.assertEqual(1, self.mockLock.return_value.release.call_count)
-
-        self.assertEqual(1, self.mockCurve.by_name.call_count)
-        self.assertEqual(0, self.mockRedis.return_value.hmset.call_count)
-        self.assertEqual(0, self.mockECKey.call_count)
-
-        self.assertTrue(self.app.logger.error.called)
-
-    def test_new_key_required_acquire_failure(self):
-
-        self.mockLock.return_value.acquire.return_value = False
-        self.mockRedis.return_value.hget.side_effect = [
-            None,
-            json.dumps({
-                'x': 0,
-                'y': 1,
-                'd': 2,
-                'crv': 'P-256'
-            })
-        ]
+        self.app.config['JWE_ECDH_ES_KEY_PER_IP'] = False
 
         ret = self.ext.get_server_key(self.app)
 
-        self.assertEqual(1, self.mockRedis.call_count)
-        self.assertEqual(2, self.mockRedis.return_value.hget.call_count)
+        self.assertIsNotNone(ret)
+        self.assertFalse(self.mockGetRemoteIp.called)
+        self.assertEqual('flask-jwe-ecdh-es-key', self.mockRedis.get.call_args_list[0][0][0])
 
-        self.assertEqual('ecdh-es-key', self.mockRedis.return_value.hget.call_args_list[0][0][0])
-        self.assertEqual('last_updated', self.mockRedis.return_value.hget.call_args_list[0][0][1])
+    def test_key_exists(self):
 
-        self.assertEqual(1, self.mockLock.call_count)
-        self.assertEqual(self.mockRedis.return_value, self.mockLock.call_args[0][0])
-        self.assertEqual('ECDH-ES-Lock', self.mockLock.call_args[0][1])
-        self.assertEqual(1, self.mockLock.return_value.acquire.call_count)
-        self.assertEqual(1, self.mockLock.return_value.release.call_count)
+        self.mockRedis.get.side_effect = None
+        self.mockRedis.get.return_value = json.dumps(self.ec_jwk)
 
-        self.assertEqual(1, self.mockCurve.by_name.call_count)
-        self.assertEqual(0, self.mockRedis.return_value.hmset.call_count)
+        self.ext.get_server_key(self.app)
 
-        self.assertEqual(2, self.mockECKey.call_count)
-        self.assertEqual(0, self.mockECKey.call_args[1]['x'])
-        self.assertEqual(1, self.mockECKey.call_args[1]['y'])
-        self.assertEqual(2, self.mockECKey.call_args[1]['d'])
-        self.assertEqual('P-256', self.mockECKey.call_args[1]['crv'])
-        self.assertEqual(self.mockECKey.return_value, ret)
+        self.assertEqual(1, self.mockECKey.call_count)
+        new_priv = base64_to_long(self.ec_jwk['d'])
+        calc_d = new_priv ^ (self.app.config['JWE_ECDH_ES_KEY_XOR'] & int('FF' * 32, 16))
 
-        self.assertTrue(self.app.logger.error.called)
+        self.assertEqual('enc', self.mockECKey.call_args[1]['use'])
+        self.assertEqual('new_x', self.mockECKey.call_args[1]['x'])
+        self.assertEqual('new_y', self.mockECKey.call_args[1]['y'])
+        self.assertEqual(calc_d, self.mockECKey.call_args[1]['d'])
+        self.assertEqual(self.app.config['ECDH_CURVE'], self.mockECKey.call_args[1]['crv'])
+
+    def test_no_xor_key_exists(self):
+
+        self.mockRedis.get.side_effect = None
+        self.mockRedis.get.return_value = json.dumps(self.ec_jwk)
+        self.app.config['JWE_ECDH_ES_KEY_XOR'] = None
+
+        self.ext.get_server_key(self.app)
+
+        self.assertEqual(1, self.mockECKey.call_count)
+
+        self.assertEqual('enc', self.mockECKey.call_args_list[0][1]['use'])
+        self.assertEqual(self.ec_jwk['x'], self.mockECKey.call_args_list[0][1]['x'])
+        self.assertEqual(self.ec_jwk['y'], self.mockECKey.call_args_list[0][1]['y'])
+        self.assertEqual(self.ec_jwk['d'], self.mockECKey.call_args_list[0][1]['d'])
+        self.assertEqual(self.app.config['ECDH_CURVE'], self.mockECKey.call_args_list[0][1]['crv'])
+
+    def test_exception(self):
+
+        self.mockRedis.setnx.side_effect = Exception()
+
+        ret = self.ext.get_server_key(self.app)
+
+        self.assertIsNone(ret)
+        self.assertFalse(self.mockRedis.ttl.called)
+
 
 class TestReverseEcho(AutoPatchTestCase):
 
@@ -688,22 +637,189 @@ class TestReverseEcho(AutoPatchTestCase):
 
         self.mockRequest.is_jwe = True
         self.mockRequest.get_jwe_data.return_value = 'tacocat1'
+        self.mockRequest.get_data.return_value = 'tacocat1'
 
         self.ext = FlaskJWE()
+        self.ext.app = MagicMock()
+        self.ext.app.config = {'JWE_SET_REQUEST_DATA': True}
 
-    def test_go_right(self):
+    def test_go_right_set_request_data(self):
 
         self.ext.reverse_echo()
 
+        self.assertEqual(0, self.mockRequest.get_jwe_data.call_count)
+        self.assertEqual(1, self.mockRequest.get_data.call_count)
         self.assertEqual(1, self.mockResponse.call_count)
         self.assertEqual('1tacocat', self.mockResponse.call_args[0][0])
 
-    def test_not_jwe(self):
+    def test_go_right_not_set_request_data(self):
 
-        self.mockRequest.is_jwe = False
+        self.ext.app.config['JWE_SET_REQUEST_DATA'] = False
+
         self.ext.reverse_echo()
 
-        self.assertFalse(self.mockResponse.called)
+        self.assertEqual(1, self.mockRequest.get_jwe_data.call_count)
+        self.assertEqual(0, self.mockRequest.get_data.call_count)
+        self.assertEqual(1, self.mockResponse.call_count)
+        self.assertEqual('1tacocat', self.mockResponse.call_args[0][0])
+
+    def test_not_jwe_decorator_test(self):
+
+        self.mockRequest.is_jwe = False
+
+        ret = self.ext.reverse_echo()
+
+        # Verify Decorator
+        self.assertTrue(self.mockResponse.called)
+        self.assertEqual('JWE Request Required', self.mockResponse.call_args[0][0])
+        self.assertEqual('text/plain', self.mockResponse.call_args[1]['mimetype'])
+        self.assertEqual(400, self.mockResponse.call_args[1]['status'])
+
+class TestGetRemoteIp(AutoPatchTestCase):
+
+    def setUp(self):
+
+        self.patcher1 =  patch('flask_jwe.request')
+        self.mockRequest = self.patcher1.start()
+
+        # Null Request Data
+        self.mockRequest.access_route = []
+        self.mockRequest.remote_addr = None
+
+        self.ext = FlaskJWE()
+
+    def test_access_route(self):
+        self.mockRequest.access_route = ['10.10.10.10']
+        ret = self.ext.get_remote_ip()
+        self.assertEqual('10.10.10.10', ret)
+
+    def test_remote_addr(self):
+        self.mockRequest.remote_addr = '10.10.10.10'
+        ret = self.ext.get_remote_ip()
+        self.assertEqual('10.10.10.10', ret)
+
+    def test_default_addr(self):
+        ret = self.ext.get_remote_ip()
+        self.assertEqual('127.0.0.1', ret)
+
+class TestGetRedisClient(AutoPatchTestCase):
+
+    def setUp(self):
+
+        self.patcher1 = patch('flask_jwe.urlparse', wraps=urlparse)
+        self.patcher2 = patch('flask_jwe.StrictRedis')
+        self.patcher3 = patch('flask_jwe.Sentinel')
+
+        self.mockUrlParse = self.patcher1.start()
+        self.mockRedis = self.patcher2.start()
+        self.mockSentinel = self.patcher3.start()
+
+        self.mockRedisClient = Mock()
+        self.mockRedisClient.info.return_value = 'OK'
+
+        self.mockSentinelObj = Mock()
+        self.mockSentinelObj.slave_for.return_value = self.mockRedisClient
+        self.mockSentinelObj.master_for.return_value = self.mockRedisClient
+
+        self.mockSentinel.return_value = self.mockSentinelObj
+
+        self.redis_uri = 'redis://localhost:6379/0'
+        self.redis_sentinel_uri = 'redis+sentinel://localhost:1234,otherhost:1234/serviceName'
+        self.mockApp = MagicMock()
+        self.mockLogger = MagicMock()
+        self.mockApp.logger = self.mockLogger
+
+        self.ext = FlaskJWE(self.mockApp)
+
+    def test_go_right_config(self):
+
+        ret = self.ext.get_redis_client(connection_uri=self.redis_uri)
+
+        self.assertIsNotNone(ret)
+        self.assertEqual(self.mockRedis.return_value, ret)
+
+        self.assertEqual(1, self.mockUrlParse.call_count)
+        self.assertEqual(self.redis_uri, self.mockUrlParse.call_args[0][0])
+
+        self.assertEqual(1, self.mockRedis.call_count)
+        self.assertEqual('localhost', self.mockRedis.call_args[1]['host'])
+        self.assertEqual(6379, self.mockRedis.call_args[1]['port'])
+        self.assertNotIn('0', self.mockRedis.call_args[1])
+
+        self.assertFalse(self.mockSentinel.called)
+
+    def test_go_right_sentinel_master(self):
+
+        ret = self.ext.get_redis_client(connection_uri=self.redis_sentinel_uri)
+
+        self.assertIsNotNone(ret)
+        self.assertEqual(self.mockRedisClient, ret)
+
+        self.assertEqual(1, self.mockUrlParse.call_count)
+        self.assertEqual(self.redis_sentinel_uri, self.mockUrlParse.call_args[0][0])
+
+        self.assertEqual(1, self.mockSentinel.call_count)
+        self.assertEqual([('localhost', '1234'), ('otherhost', '1234')], self.mockSentinel.call_args[0][0])
+        self.assertEqual(2, self.mockSentinel.call_args[1]['socket_timeout'])
+        self.assertTrue(self.mockSentinel.call_args[1]['retry_on_timeout'])
+
+        self.assertFalse(self.mockSentinelObj.slave_for.called)
+        self.assertEqual(1, self.mockSentinelObj.master_for.call_count)
+        self.assertEqual('serviceName', self.mockSentinelObj.master_for.call_args[0][0])
+
+        self.assertEqual(1, self.mockRedisClient.info.call_count)
+
+    def test_go_right_sentinel_slave(self):
+
+        ret = self.ext.get_redis_client(connection_uri=self.redis_sentinel_uri, read_only=True)
+
+        self.assertIsNotNone(ret)
+        self.assertEqual(self.mockRedisClient, ret)
+
+        self.assertFalse(self.mockSentinelObj.master_for.called)
+        self.assertEqual(1, self.mockSentinelObj.slave_for.call_count)
+        self.assertEqual('serviceName', self.mockSentinelObj.slave_for.call_args[0][0])
+
+        self.assertEqual(1, self.mockRedisClient.info.call_count)
+
+    def test_slave_info_exception(self):
+
+        from redis.sentinel import SlaveNotFoundError
+        self.mockRedisClient.info.side_effect = SlaveNotFoundError('Slave Connection Failed')
+
+        ret = self.ext.get_redis_client(connection_uri=self.redis_sentinel_uri, read_only=True)
+
+        self.assertIsNone(ret)
+
+    def test_master_info_exception(self):
+
+        from redis.sentinel import MasterNotFoundError
+        self.mockRedisClient.info.side_effect = MasterNotFoundError('Master Connection Failed')
+
+        ret = self.ext.get_redis_client(connection_uri=self.redis_sentinel_uri)
+
+        self.assertIsNone(ret)
+
+    def test_connection_error_once(self):
+
+        from redis.sentinel import MasterNotFoundError
+        self.mockRedisClient.info.side_effect = [MasterNotFoundError('Master Connection Failed'), 'bob']
+
+        ret = self.ext.get_redis_client(connection_uri=self.redis_sentinel_uri)
+
+        self.assertIsNotNone(ret)
+        self.assertEqual(self.mockRedisClient, ret)
+
+        self.assertEqual(2, self.mockSentinelObj.master_for.call_count)
+        self.assertEqual('serviceName', self.mockSentinelObj.master_for.call_args[0][0])
+
+        self.assertEqual(2, self.mockRedisClient.info.call_count)
+
+    def test_invalid_scheme(self):
+
+        ret = self.ext.get_redis_client(connection_uri='unknown://host:1234/serviceName')
+
+        self.assertIsNone(ret)
 
 if __name__ == '__main__':
     unittest.main()

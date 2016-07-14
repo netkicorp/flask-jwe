@@ -7,7 +7,7 @@ import unittest
 
 from Crypto.PublicKey import RSA
 
-from flask import Flask
+from flask import Flask, Response
 from flask_jwe import FlaskJWE
 from flask.ext.testing import LiveServerTestCase
 
@@ -24,6 +24,9 @@ rsakey = RSA.generate(2048)
 TEST_RSA_KEY = RSAKey(key=rsakey)
 TEST_SYMKEY = SYMKey(KEY="My hollow echo", alg="HS512")
 
+def index():
+    return Response(status=200)
+
 class FlaskJWEFunctionalTest(LiveServerTestCase):
 
     def create_app(self):
@@ -36,8 +39,12 @@ class FlaskJWEFunctionalTest(LiveServerTestCase):
         app.config['DEBUG'] = True
         app.config['JWE_SERVER_RSA_KEY'] = TEST_RSA_KEY
         app.config['JWE_SERVER_SYM_KEY'] = TEST_SYMKEY
+        app.config['JWE_ECDH_ES_KEY_XOR'] = int('042e8ab11980b5b9c36f15e4d61614b30ac8619b3a8c94d6147d9b3da3609ca7', 16)
         flask_jwe = FlaskJWE(app)
         self.app = app
+
+        # Add URL Route for /
+        app.add_url_rule('/', 'index', index)
         return app
 
     def setUp(self):
