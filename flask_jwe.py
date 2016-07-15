@@ -120,6 +120,7 @@ class FlaskJWE(object):
             msg=response_class.get_data(),
             alg=request.jwe.jwt.headers.get('alg'),
             enc=request.jwe.jwt.headers.get('enc'),
+            cty=response_class.content_type
         )
 
         # Add EPK for ECDH-ES Requests

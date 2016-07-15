@@ -312,6 +312,7 @@ class TestJweEncrypt(AutoPatchTestCase):
 
         self.responseClass = Mock()
         self.responseClass.get_data.return_value = 'testmsg'
+        self.responseClass.content_type = 'application/test-type'
 
         self.returnJwe = MagicMock()
         self.returnJwe.alg = 'A128KW'
@@ -325,6 +326,7 @@ class TestJweEncrypt(AutoPatchTestCase):
         self.assertEqual('testmsg', self.mockJwe.call_args[1]['msg'])
         self.assertEqual('testalg', self.mockJwe.call_args[1]['alg'])
         self.assertEqual('testenc', self.mockJwe.call_args[1]['enc'])
+        self.assertEqual('application/test-type', self.mockJwe.call_args[1]['cty'])
         self.assertFalse(self.mockECKey.called)
         self.assertEqual(1, self.mockJwe.return_value.encrypt.call_count)
         self.assertEqual(1, self.mockGetKeys.call_count)
@@ -340,6 +342,7 @@ class TestJweEncrypt(AutoPatchTestCase):
         self.assertEqual('testmsg', self.mockJwe.call_args[1]['msg'])
         self.assertEqual('testalg', self.mockJwe.call_args[1]['alg'])
         self.assertEqual('testenc', self.mockJwe.call_args[1]['enc'])
+        self.assertEqual('application/test-type', self.mockJwe.call_args[1]['cty'])
         self.assertEqual(1, self.mockECKey.call_count)
         self.assertEqual('testepk', self.mockECKey.call_args[1]['value'])
         self.assertEqual(1, self.mockJwe.return_value.encrypt.call_count)

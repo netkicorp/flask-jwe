@@ -1,5 +1,11 @@
 # Flask-JWE Changelog
 
+## 0.0.5 (2016-07-14)
+
+Bugfixes:
+
+  - Include appropriate `cty` JWE header in response JWE
+
 ## 0.0.4 (2016-07-14)
 
 Bugfixes:
