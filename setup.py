@@ -10,7 +10,7 @@ from setuptools import setup
 
 setup(
     name='Flask-JWE',
-    version='0.0.2',
+    version='0.0.3',
     url='http://github.com/netkicorp/flask-jwe',
     license='BSD3',
     author='Netki Opensource',

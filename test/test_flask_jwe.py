@@ -361,7 +361,10 @@ class TestJweDecrypt(AutoPatchTestCase):
         self.app = MagicMock()
         self.jwe = MagicMock()
         self.jwe.decrypt.return_value = 'retval'
+        self.jwe.jwt.headers = {}
         self.ext = FlaskJWE(self.app)
+
+        self.mockRequest.environ = {}
 
     def test_go_right(self):
 
@@ -375,6 +378,25 @@ class TestJweDecrypt(AutoPatchTestCase):
         self.assertFalse(self.mockResponse.called)
         self.assertEqual('retval', self.mockRequest.get_jwe_data())
         self.assertEqual('retval', self.mockRequest.data)
+        self.assertFalse(self.mockRequest._parse_content_type.called)
+
+    def test_go_right_with_content_type(self):
+
+        self.jwe.jwt.headers['cty'] = 'application/json'
+
+        self.ext.jwe_decrypt(self.jwe)
+
+        self.assertEqual(1, self.jwe.decrypt.call_count)
+        self.assertEqual(self.mockGetKeys.return_value, self.jwe.decrypt.call_args[1]['keys'])
+        self.assertEqual(True, self.mockRequest.is_jwe)
+        self.assertTrue(hasattr(self.mockRequest.get_jwe_data, '__call__'))
+        self.assertFalse(self.app.logger.error.called)
+        self.assertFalse(self.mockResponse.called)
+        self.assertEqual('retval', self.mockRequest.get_jwe_data())
+        self.assertEqual('retval', self.mockRequest.data)
+        self.assertEqual(1, self.mockRequest._parse_content_type.call_count)
+        self.assertIn('CONTENT_TYPE', self.mockRequest.environ)
+        self.assertEqual('application/json', self.mockRequest.environ['CONTENT_TYPE'])
 
     def test_do_not_reset_data(self):
 

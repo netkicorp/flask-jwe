@@ -60,7 +60,8 @@ class FlaskJWEFunctionalTest(LiveServerTestCase):
             msg=ECHO_TEST,
             alg='ECDH-ES',
             enc='A128GCM',
-            epk=epk
+            epk=epk,
+            cty='text/plain'
         )
 
         local_key = self.get_local_key(epk)
@@ -83,7 +84,8 @@ class FlaskJWEFunctionalTest(LiveServerTestCase):
             msg=ECHO_TEST,
             alg='ECDH-ES+A128KW',
             enc='A128GCM',
-            epk=epk
+            epk=epk,
+            cty='text/plain'
         )
 
         local_key = self.get_local_key(epk)
@@ -107,7 +109,8 @@ class FlaskJWEFunctionalTest(LiveServerTestCase):
             msg=ECHO_TEST,
             alg='ECDH-ES+A192KW',
             enc='A128GCM',
-            epk=epk
+            epk=epk,
+            cty='text/plain'
         )
 
         local_key = self.get_local_key(epk)
@@ -131,7 +134,8 @@ class FlaskJWEFunctionalTest(LiveServerTestCase):
             msg=ECHO_TEST,
             alg='ECDH-ES+A256KW',
             enc='A128GCM',
-            epk=epk
+            epk=epk,
+            cty='text/plain'
         )
 
         local_key = self.get_local_key(epk)
@@ -155,7 +159,8 @@ class FlaskJWEFunctionalTest(LiveServerTestCase):
             msg=ECHO_TEST,
             alg='ECDH-ES+A128KW',
             enc='A192GCM',
-            epk=epk
+            epk=epk,
+            cty='text/plain'
         )
 
         local_key = self.get_local_key(epk)
@@ -179,7 +184,8 @@ class FlaskJWEFunctionalTest(LiveServerTestCase):
             msg=ECHO_TEST,
             alg='ECDH-ES+A128KW',
             enc='A256GCM',
-            epk=epk
+            epk=epk,
+            cty='text/plain'
         )
 
         local_key = self.get_local_key(epk)
@@ -203,7 +209,8 @@ class FlaskJWEFunctionalTest(LiveServerTestCase):
             msg=ECHO_TEST,
             alg='ECDH-ES+A128KW',
             enc='A128CBC-HS256',
-            epk=epk
+            epk=epk,
+            cty='text/plain'
         )
 
         local_key = self.get_local_key(epk)
@@ -227,7 +234,8 @@ class FlaskJWEFunctionalTest(LiveServerTestCase):
             msg=ECHO_TEST,
             alg='ECDH-ES+A128KW',
             enc='A192CBC-HS384',
-            epk=epk
+            epk=epk,
+            cty='text/plain'
         )
 
         local_key = self.get_local_key(epk)
@@ -251,7 +259,8 @@ class FlaskJWEFunctionalTest(LiveServerTestCase):
             msg=ECHO_TEST,
             alg='ECDH-ES+A128KW',
             enc='A256CBC-HS512',
-            epk=epk
+            epk=epk,
+            cty='text/plain'
         )
 
         local_key = self.get_local_key(epk)
@@ -273,7 +282,8 @@ class FlaskJWEFunctionalTest(LiveServerTestCase):
         submit_jwe = JWE(
             msg=ECHO_TEST,
             alg='RSA1_5',
-            enc='A128CBC-HS256'
+            enc='A128CBC-HS256',
+            cty='text/plain'
         )
 
         # Encrypt and Send JWE
@@ -291,7 +301,8 @@ class FlaskJWEFunctionalTest(LiveServerTestCase):
         submit_jwe = JWE(
             msg=ECHO_TEST,
             alg='RSA-OAEP',
-            enc='A256GCM'
+            enc='A256GCM',
+            cty='text/plain'
         )
 
         # Encrypt and Send JWE

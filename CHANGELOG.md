@@ -1,5 +1,11 @@
 # Flask-JWE Changelog
 
+## 0.0.3 (2016-07-14)
+
+Bugfixes:
+
+  - Allow for JWE `cty` header to reset Content-Type for request after request data replacement
+
 ## 0.0.2 (2016-07-14)
 
 Features:
