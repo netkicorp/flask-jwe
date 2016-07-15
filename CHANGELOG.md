@@ -1,8 +1,14 @@
 # Flask-JWE Changelog
 
-## 0.0.3 (2016-07-14)
+## 0.0.4 (2016-07-14)
 
 Bugfixes:
+
+  - Remove `request._parsed_content_type` before calling request._parse_content_type() after Content-Type change
+
+## 0.0.3 (2016-07-14)
+
+Features:
 
   - Allow for JWE `cty` header to reset Content-Type for request after request data replacement
 

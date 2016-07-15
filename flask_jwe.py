@@ -143,6 +143,8 @@ class FlaskJWE(object):
                 request._cached_data = msg
                 if jwe.jwt.headers.get('cty'):
                     request.environ['CONTENT_TYPE'] = jwe.jwt.headers.get('cty')
+                    if '_parsed_content_type' in request.__dict__:
+                        del request.__dict__['_parsed_content_type']
                     request._parse_content_type()
         except Exception as e:
             self.app.logger.error("Unable to decrypt JWE: %s" % str(e))
