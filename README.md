@@ -69,9 +69,9 @@ The plugin is configured via Flask configuration options. The following table de
 As of the time of this writing (module version 1.1.5), the supported algorithms are:
 
 * ECDH-ES
-* ECDS-ES+A128KW
-* ECDS-ES+A192KW
-* ECDS-ES+A256KW
+* ECDH-ES+A128KW
+* ECDH-ES+A192KW
+* ECDH-ES+A256KW
 * RSA1_5
 * RSA-OAEP
 * A128KW
