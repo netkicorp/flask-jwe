@@ -1,13 +1,21 @@
 import json
+import random
 import traceback
+
+from base64 import b64encode, b64decode
+from hashlib import sha256
 
 from jwkest import jwe, base64_to_long
 from jwkest.ecc import NISTEllipticCurve
 from jwkest.jwe import JWE
-from jwkest.jwk import ECKey
+from jwkest.jwk import ECKey, RSAKey
 from flask import Response, request
 from functools import wraps
 from urlparse import urlparse
+
+from Crypto import Random
+from Crypto.Cipher import AES
+from Crypto.PublicKey import RSA
 
 try:
     from flask import _app_ctx_stack as stack
@@ -21,6 +29,9 @@ except ImportError:
     pass
 
 JOSE_CONTENT_TYPE = 'application/jose'
+BS = AES.block_size
+pad = lambda s: s + (BS - len(s) % BS) * chr(BS - len(s) % BS)
+unpad = lambda s : s[:-ord(s[len(s)-1:])]
 
 def jwe_request_required(f):
     @wraps(f)
@@ -46,11 +57,11 @@ class FlaskJWE(object):
         app.config.setdefault('SERVER_PUB_JWK_ENDPOINT', '/serverpubkey')
         app.config.setdefault('JWE_ECDH_ES', True)
         app.config.setdefault('ECDH_CURVE', 'P-256')  # Available Options: ['P-256', 'P-384', 'P-521']
-        app.config.setdefault('JWE_ECDH_ES_KEY_EXPIRES', -1) # Expiration Time in Seconds
+        app.config.setdefault('JWE_ES_KEY_EXPIRES', -1) # Expiration Time in Seconds
         app.config.setdefault('JWE_SERVER_RSA_KEY', None)
         app.config.setdefault('JWE_SERVER_SYM_KEY', None)
-        app.config.setdefault('JWE_ECDH_ES_KEY_PER_IP', True)
-        app.config.setdefault('JWE_ECDH_ES_KEY_XOR', None)
+        app.config.setdefault('JWE_SERVER_KEY_PER_IP', True)
+        app.config.setdefault('JWE_KEY_ENCRYPTION_KEY', None)
         app.config.setdefault('JWE_SET_REQUEST_DATA', True)
 
         # Set Redis Defaults
@@ -71,16 +82,16 @@ class FlaskJWE(object):
         app.before_request(self.on_request_start)
         app.after_request(self.on_request_end)
 
-    def get_keys(self):
+    def get_keys(self, alg):
         keys = []
         if self.app.config['JWE_SERVER_RSA_KEY']:
             keys.append(self.app.config['JWE_SERVER_RSA_KEY'])
         if self.app.config['JWE_SERVER_SYM_KEY']:
             keys.append(self.app.config['JWE_SERVER_SYM_KEY'])
 
-        server_ecdh_key = self.get_server_key(self.app)
-        if server_ecdh_key:
-            keys.append(server_ecdh_key)
+        server_es_key = self.get_server_key(self.app, alg)
+        if server_es_key:
+            keys.append(server_es_key)
 
         return keys
 
@@ -92,7 +103,6 @@ class FlaskJWE(object):
         request.jwe = self.is_jwe(request)
         if request.jwe:
             request.set_jwe_response = set_jwe_response
-            self.app.logger.debug("Processing JOSE-JWE Request")
             self.jwe_decrypt(request.jwe)
 
     def on_request_end(self, response_class):
@@ -123,16 +133,23 @@ class FlaskJWE(object):
             cty=response_class.content_type
         )
 
-        # Add EPK for ECDH-ES Requests
+        # Add EPK and KID for ECDH-ES Requests
+        keys = []
         if jwe.alg.startswith('ECDH-ES'):
-            jwe._dict['epk'] = ECKey(**request.jwe.jwt.headers.get('epk'))
+            jwe._dict['kid'] = request.jwe.jwt.headers.get('epk', {}).get('kid')
+            jwe._dict['epk'] = self.get_server_key(self.app, request.jwe.jwt.headers.get('alg'))
+            keys.append(ECKey(**request.jwe.jwt.headers.get('epk')))
 
-        return jwe.encrypt(keys=self.get_keys())
+        elif jwe.alg.startswith('RSA'):
+            # TODO: Finish RSA-ES Once Two-way JWS Questions are Resolved
+            pass
+
+        return jwe.encrypt(keys=keys)
 
     def jwe_decrypt(self, jwe):
         try:
             # Decrypt JWE
-            msg = jwe.decrypt(keys=self.get_keys())
+            msg = jwe.decrypt(keys=self.get_keys(jwe.jwt.headers.get('alg')))
 
             def get_jwe_data():
                 return msg
@@ -153,9 +170,14 @@ class FlaskJWE(object):
             return Response(json.dumps({'error_message': 'Unable to decrypt JWE Token'}), status=500, mimetype='application/json')
 
     def return_jwk_pub(self):
+
+        alg = request.args.get('alg', None)
+        if not alg:
+            return Response('Required parameter "alg" missing', status=400, mimetype='text/plain')
+
         ret = {'keys': []}
 
-        fullkey = self.get_server_key(self.app)
+        fullkey = self.get_server_key(self.app, alg)
         if fullkey:
             ret['keys'].append(fullkey.serialize(False))
         return Response(json.dumps(ret), content_type=JOSE_CONTENT_TYPE)
@@ -169,54 +191,21 @@ class FlaskJWE(object):
     #########################################
     # Server Ephemeral Static Key Operations
     #########################################
-    def get_server_key(self, app):
-
-        key = None
-        curve = NISTEllipticCurve.by_name(app.config['ECDH_CURVE'])
+    def get_server_key(self, app, alg):
 
         try:
-            client = self.get_redis_client(connection_uri=app.config['JWE_REDIS_URI'])
-            if not client:
-                app.logger.fatal('Unable to connect to Redis')
-                return None
-
-            key_name = 'flask-jwe-ecdh-es-key'
-            if app.config['JWE_ECDH_ES_KEY_PER_IP']:
+            key_name = 'flask-jwe-%s-key' % alg.lower()
+            if app.config['JWE_SERVER_KEY_PER_IP']:
                 key_name += '-%s' % self.get_remote_ip()
 
-            ec_jwk = client.get(key_name)
-            if not ec_jwk:
+            key = self.get_redis_jwk(key_name)
+            if not key:
+                app.logger.debug('Creating New %s KeyPair' % alg)
+                key = self.set_redis_jwk(key_name, self.generate_jwk(sha256(key_name).hexdigest(), alg))
 
-                app.logger.debug('Creating New ECDH-ES KeyPair')
-
-                # Generate New EC Keypair
-                priv, pub = curve.key_pair()
-                ec_jwk = ECKey(use='enc', x=pub[0], y=pub[1], d=priv, crv=app.config['ECDH_CURVE'])
-
-                # Set JWK Value if it doesn't already exist
-                client.setnx(key_name, json.dumps(ec_jwk.serialize(True)))
-
-                # Set expiration if there is no expiration on the key
-                if app.config['JWE_ECDH_ES_KEY_EXPIRES'] > 0 and not client.ttl(key_name):
-                    client.expire(key_name, app.config['JWE_ECDH_ES_KEY_EXPIRES'])
-
-                # Retrieve the key again in case the key was created elsewhere in a race condition
-                ec_jwk = client.get(key_name)
-
-            # Reconstitute the ECKey from the ec_jwk data
-            jwk_dict = json.loads(ec_jwk)
-
-            # XOR Privkey If Configured to do so
-            if app.config['JWE_ECDH_ES_KEY_XOR']:
-                base_d = base64_to_long(jwk_dict['d'].encode('utf-8'))
-                xor_value = app.config['JWE_ECDH_ES_KEY_XOR'] & int('FF' * curve.bytes, 16)
-                calc_priv = base_d ^ xor_value
-                calc_pub = curve.public_key_for(calc_priv)
-                key = ECKey(use='enc', x=calc_pub[0], y=calc_pub[1], d=calc_priv, crv=jwk_dict['crv'])
-            else:
-                key = ECKey(use='enc', x=jwk_dict['x'], y=jwk_dict['y'], d=jwk_dict['d'], crv=jwk_dict['crv'])
         except Exception as e:
-            app.logger.error('Exception Occurred Generating Retrieving / Setting ECDH-ES KeyPair: %s' % str(e))
+            app.logger.error('Exception Occurred Generating Retrieving / Setting ES KeyPair: %s' % str(e))
+            return None
 
         return key
 
@@ -227,6 +216,81 @@ class FlaskJWE(object):
         else:
             ret_str = request.get_jwe_data()[::-1]
         return Response(ret_str)
+
+    #########################################
+    # Utility Functionality
+    #########################################
+    def generate_jwk(self, kid, alg):
+
+        ret_jwk = None
+
+        if alg.startswith('ECDH-ES'):
+            curve = NISTEllipticCurve.by_name(self.app.config['ECDH_CURVE'])
+            priv, pub = curve.key_pair()
+            ret_jwk = ECKey(use='enc', x=pub[0], y=pub[1], d=priv, crv=self.app.config['ECDH_CURVE'], kid=kid)
+
+        elif alg.startswith('RSA'):
+            new_rsa_key = RSA.generate(2048)
+            ret_jwk = RSAKey(use='enc', key=new_rsa_key, kid=kid)
+
+        return ret_jwk
+
+    def build_jwk(self, serialized_jwk):
+
+        jwk_dict = json.loads(serialized_jwk)
+
+        if jwk_dict.get('kty') == 'EC':
+            return ECKey(**jwk_dict)
+        elif jwk_dict.get('kty') == 'RSA':
+            return RSAKey(**jwk_dict)
+        return None
+
+    def get_redis_jwk(self, key_name):
+
+        client = self.get_redis_client(connection_uri=self.app.config['JWE_REDIS_URI'])
+        if not client:
+            self.app.logger.fatal('Unable to connect to Redis')
+            return None
+
+        value = client.get(key_name)
+        if not value:
+            return None
+
+        if self.app.config['JWE_ES_KEY_EXPIRES'] > 0 and client.ttl(key_name) < 30:
+            client.expire(key_name, self.app.config['JWE_ES_KEY_EXPIRES'])
+
+        if not self.app.config['JWE_KEY_ENCRYPTION_KEY']:
+            return self.build_jwk(value)
+
+        enc = b64decode(value)
+        cipher = AES.new(self.app.config['JWE_KEY_ENCRYPTION_KEY'], AES.MODE_CBC, enc[:16])
+        value = unpad(cipher.decrypt(enc[16:]))
+
+        return self.build_jwk(value)
+
+    def set_redis_jwk(self, key_name, jwk):
+
+        client = self.get_redis_client(connection_uri=self.app.config['JWE_REDIS_URI'])
+        if not client:
+            self.app.logger.fatal('Unable to connect to Redis')
+            return None
+
+        if self.app.config['JWE_KEY_ENCRYPTION_KEY']:
+
+            if len(self.app.config['JWE_KEY_ENCRYPTION_KEY']) not in [16, 24, 32]:
+                self.app.logger.fatal('JWE_KEY_ENCRYPTION_KEY Must be 16, 24 or 32 bytes long')
+                return None
+
+            raw = pad(json.dumps(jwk.serialize(True)))
+            iv = Random.new().read(AES.block_size)
+            cipher = AES.new(self.app.config['JWE_KEY_ENCRYPTION_KEY'], AES.MODE_CBC, iv)
+            key_value = b64encode(iv + cipher.encrypt(raw))
+        else:
+            key_value = json.dumps(jwk.serialize(True))
+
+        client.setnx(key_name, key_value)
+
+        return self.get_redis_jwk(key_name)
 
     #########################################
     # Utility Functionality

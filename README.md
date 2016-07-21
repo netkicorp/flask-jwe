@@ -33,14 +33,14 @@ from flask.ext.jwe import FlaskJWE
 app = Flask('MyTestApp')
 encrypted_content = FlaskJWE(app)
 
-app.config['JWE_REDIS_URI'] = 'redis://localhost:6379/1'                    # Default
-app.config['SERVER_PUB_JWK_ENDPOINT'] = '/serverpubkey'                     # Default
-app.config['JWE_ECDH_ES'] = True                                            # Default
-app.config['ECDH_CURVE'] = 'P-256'                                          # Default, other options: 'P-256', 'P-384' or 'P-512'
-app.config['JWE_ECDH_ES_KEY_EXPIRES'] = 600                                 # Not Default
-app.config['JWE_ECDH_ES_KEY_PER_IP'] = True                                 # Default
-app.config['JWE_ECDH_ES_KEY_XOR'] = int(os.urandom(32).encode('hex'), 16)   # Not Default
-app.config['JWE_SET_REQUEST_DATA'] = True                                   # Default
+app.config['JWE_REDIS_URI'] = 'redis://localhost:6379/1'                        # Default
+app.config['SERVER_PUB_JWK_ENDPOINT'] = '/serverpubkey'                         # Default
+app.config['JWE_ECDH_ES'] = True                                                # Default
+app.config['ECDH_CURVE'] = 'P-256'                                              # Default, other options: 'P-256', 'P-384' or 'P-512'
+app.config['JWE_ES_KEY_EXPIRES'] = 600                                          # Not Default
+app.config['JWE_SERVER_KEY_PER_IP'] = True                                      # Default
+app.config['JWE_KEY_ENCRYPTION_KEY'] = int(os.urandom(32).encode('hex'), 16)    # Not Default
+app.config['JWE_SET_REQUEST_DATA'] = True                                       # Default
 
 symkey = SYMKey(key='supersecretsymmetrickey')
 app.config['JWE_SERVER_SYM_KEY'] = symkey                   # Specific Server-wide Symmetry Encryption Key
@@ -56,12 +56,12 @@ The plugin is configured via Flask configuration options. The following table de
 | SERVER_PUB_JWK_ENDPOINT | A string defining the server endpoint that will provide the current elliptical ephemeral static public key (in JWT format). This endpoint is required in order to use the ECDH-ES algorithm. | '/serverpubkey' |
 | JWE_ECDH_ES | Boolean defining ECDH-ES Support | True |
 | ECDH_CURVE | A string defining the EC Curve Used for ECDH-ES | 'P-256' |
-| JWE_ECDH_ES_KEY_EXPIRES | ECDH-ES Public Key Expiration Time in Seconds.<br><br>For no expiration, set to -1 | -1 |
+| JWE_ES_KEY_EXPIRES | ECDH-ES Public Key Expiration Time in Seconds.<br><br>For no expiration, set to -1 | -1 |
 | JWE_SERVER_RSA_KEY | Shared RSA Key Used for Encryption (Must be of type jwkest.jwk.RSAKey) | None |
 | JWE_SERVER_SYM_KEY | Shared Symmetric Key Used for Encryption (Must be of type jwkest.jwk.SYMKey) | None |
 | JWE_REDIS_URI | Redis (or Redis Sentinel) URI String Used for Storing ECDH-ES Key (required for multiple, shared servers | 'redis://localhost:6379/1' |
-| JWE_ECDH_ES_KEY_PER_IP | Create ECDH-ES Key per IP | True |
-| JWE_ECDH_ES_KEY_XOR | XOR Value for ECDH-ES Private Key to use such that Redis-stored ECDH-ES Key is Not the Actual Key Used for JWE | None |
+| JWE_SERVER_KEY_PER_IP | Create ECDH-ES Key per IP | True |
+| JWE_KEY_ENCRYPTION_KEY | 16, 24 or 32 byte Long to be used as AES-CBC key | None |
 | JWE_SET_REQUEST_DATA | Replace request.data with decrypted request data | True
 
 ## Supported Algorithms and Encoding Methods
@@ -77,6 +77,8 @@ As of the time of this writing (module version 1.1.5), the supported algorithms 
 * A128KW
 * A192KW
 * A256KW
+
+**NOTE: RSA1_5 and RSA-OAEP used in ES mode is currently not supported.**
 
 As of the time of this writing (module version 1.1.5), the supported encryption methods are:
 

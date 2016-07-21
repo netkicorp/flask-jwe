@@ -1,5 +1,21 @@
 # Flask-JWE Changelog
 
+## 0.0.6 (2016-07-21)
+
+Features:
+
+  - Replace key XORing for security to plain AES key encryption in the Redis datastore
+  - Add `alg` parameter for ES key retrieval to allow for EC and RSA keys
+
+Refactoring:
+
+  - Refactor Key Retrieval, Store and Building to simplify the FlaskJWE.get_server_key() function
+
+Open Issues:
+
+  - RSA-ES currently does not work as pyjwkest does not support saving CEK for JWE response processing (we are working to provide a pull request to fix this)
+  - Due to this open issue, this version will not be published to PyPI
+
 ## 0.0.5 (2016-07-14)
 
 Bugfixes:
