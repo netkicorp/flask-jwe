@@ -5,13 +5,15 @@ import traceback
 from base64 import b64encode, b64decode
 from hashlib import sha256
 
+from future.standard_library import install_aliases
+from urllib.parse import urlparse
+
 from jwkest import jwe, base64_to_long
 from jwkest.ecc import NISTEllipticCurve
 from jwkest.jwe import JWE
 from jwkest.jwk import ECKey, RSAKey
 from flask import Response, request
 from functools import wraps
-from urlparse import urlparse
 
 from Crypto import Random
 from Crypto.Cipher import AES
